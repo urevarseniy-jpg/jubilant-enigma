@@ -1,8 +1,10 @@
 import logging
 import asyncio
+import os
+import sys
 from typing import Optional, Dict, List
 from datetime import datetime
-import os
+from collections import deque
 
 # Telegram библиотеки
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -12,29 +14,42 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 import openai
 from openai import AsyncOpenAI
 
-# Для работы с историей сообщений
-import json
-from collections import deque
+# Flask для веб-сервера (для хостинга)
+from flask import Flask, jsonify
+import threading
 
 # Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.INFO,
+    handlers=[
+        logging.FileHandler('bot.log'),
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger(__name__)
 
+# Создаем Flask приложение для веб-сервера
+app = Flask(__name__)
+
+# ВАШИ ТОКЕНЫ (вставлены)
+TELEGRAM_TOKEN = "7640794685:AAHWcNmnqrRJw2lqVSymXp3pXym2vndql6g"
+OPENAI_API_KEY = "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"
+
 class OpenAITelegramBot:
-    def __init__(self, telegram_token: str, openai_api_key: str):
+    def __init__(self):
         """
         Инициализация бота с OpenAI
         """
-        self.telegram_token = telegram_token
-        self.openai_client = AsyncOpenAI(api_key=openai_api_key)
+        self.telegram_token = TELEGRAM_TOKEN
+        self.openai_api_key = OPENAI_API_KEY
+        
+        self.openai_client = AsyncOpenAI(api_key=self.openai_api_key)
         
         # Хранилище истории диалогов для каждого пользователя
         self.user_conversations: Dict[int, deque] = {}
         
-        # Максимальная длина истории (количество сообщений)
+        # Максимальная длина истории
         self.max_history_length = 20
         
         # Настройки пользователей
@@ -47,12 +62,14 @@ class OpenAITelegramBot:
             "gpt-3.5-turbo": "GPT-3.5 Turbo (быстрый и дешевый)"
         }
         
+        self.application = None
+        logger.info("Бот инициализирован")
+    
     def get_user_history(self, user_id: int) -> List[dict]:
         """Получение истории диалога пользователя"""
         if user_id not in self.user_conversations:
             self.user_conversations[user_id] = deque(maxlen=self.max_history_length)
         
-        # Преобразуем deque в список сообщений для API
         messages = []
         for msg in self.user_conversations[user_id]:
             messages.append({"role": msg["role"], "content": msg["content"]})
@@ -77,7 +94,7 @@ class OpenAITelegramBot:
                 "model": "gpt-3.5-turbo",
                 "temperature": 0.7,
                 "max_tokens": 1000,
-                "system_prompt": "Ты полезный ассистент. Отвечай дружелюбно и информативно."
+                "system_prompt": "Ты полезный ассистент. Отвечай дружелюбно и информативно на русском языке."
             }
         return self.user_settings[user_id]
     
@@ -87,19 +104,14 @@ class OpenAITelegramBot:
         """
         try:
             settings = self.get_user_settings(user_id)
-            
-            # Получаем историю диалога
             history = self.get_user_history(user_id)
             
-            # Формируем сообщения для API
             messages = [
                 {"role": "system", "content": settings["system_prompt"]}
             ]
             
-            # Добавляем историю диалога
-            messages.extend(history[-10:])  # Последние 10 сообщений для контекста
-            
-            # Добавляем новое сообщение пользователя
+            # Добавляем историю
+            messages.extend(history[-10:])
             messages.append({"role": "user", "content": user_message})
             
             # Отправляем запрос к OpenAI
@@ -113,7 +125,6 @@ class OpenAITelegramBot:
                 presence_penalty=0.3
             )
             
-            # Получаем ответ
             bot_response = response.choices[0].message.content
             
             # Сохраняем в историю
@@ -125,38 +136,27 @@ class OpenAITelegramBot:
         except openai.RateLimitError:
             logger.error("Rate limit exceeded")
             return "⚠️ Превышен лимит запросов к API. Пожалуйста, подождите немного."
-            
         except openai.APIError as e:
             logger.error(f"OpenAI API error: {e}")
             return "⚠️ Ошибка при обращении к OpenAI. Попробуйте позже."
-            
         except Exception as e:
             logger.error(f"Unexpected error: {e}")
             return "⚠️ Произошла непредвиденная ошибка."
     
-    # Обработчики команд
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик команды /start"""
         welcome_message = (
             "🤖 **Добро пожаловать в AI-бота на базе OpenAI!**\n\n"
-            "Я использую технологии ChatGPT для общения. Вот что я умею:\n\n"
-            "📝 **Основные возможности:**\n"
-            "• Отвечать на любые вопросы\n"
-            "• Помогать с написанием кода\n"
-            "• Переводить тексты\n"
-            "• Объяснять сложные темы\n"
-            "• Поддерживать контекст разговора\n\n"
-            "🔧 **Доступные команды:**\n"
-            "/help - подробная помощь\n"
-            "/settings - настройки модели\n"
+            "Я использую технологии ChatGPT для общения.\n\n"
+            "📝 **Команды:**\n"
+            "/help - помощь\n"
+            "/settings - настройки\n"
             "/clear - очистить историю\n"
             "/model - сменить модель\n"
-            "/stats - статистика использования\n"
-            "/system - изменить системный промпт\n\n"
-            "Просто напиши мне сообщение, и я отвечу!"
+            "/stats - статистика\n\n"
+            "Просто напиши мне сообщение!"
         )
         
-        # Создаем клавиатуру
         keyboard = [
             [InlineKeyboardButton("🔧 Настройки", callback_data="settings"),
              InlineKeyboardButton("📊 Статистика", callback_data="stats")],
@@ -175,24 +175,14 @@ class OpenAITelegramBot:
         """Обработчик команды /help"""
         help_text = (
             "🔍 **Подробная справка**\n\n"
-            "**Основные команды:**\n"
-            "/settings - настройка параметров генерации\n"
+            "/settings - настройка параметров\n"
             "/model - выбор модели GPT\n"
-            "/system - изменение системного промпта\n"
-            "/clear - очистка истории диалога\n"
+            "/clear - очистка истории\n"
             "/stats - просмотр статистики\n\n"
-            
-            "**Параметры настройки:**\n"
-            "• **Модель**: выбор между GPT-3.5 и GPT-4\n"
-            "• **Температура**: креативность ответов (0.1 - 2.0)\n"
-            "• **Max tokens**: максимальная длина ответа\n"
-            "• **System prompt**: инструкция для поведения бота\n\n"
-            
-            "**Советы по использованию:**\n"
-            "• Бот помнит последние 20 сообщений диалога\n"
-            "• Для сложных задач используйте GPT-4\n"
-            "• Для быстрых ответов - GPT-3.5\n"
-            "• Температура 0.7 оптимальна для большинства задач"
+            "**Параметры:**\n"
+            "• Температура: креативность ответов\n"
+            "• Max tokens: длина ответа\n"
+            "• System prompt: поведение бота"
         )
         await update.message.reply_text(help_text, parse_mode='Markdown')
     
@@ -201,26 +191,24 @@ class OpenAITelegramBot:
         user_id = update.effective_user.id
         settings = self.get_user_settings(user_id)
         
-        settings_text = (
+        text = (
             f"⚙️ **Текущие настройки**\n\n"
             f"**Модель:** {settings['model']}\n"
             f"**Температура:** {settings['temperature']}\n"
             f"**Max tokens:** {settings['max_tokens']}\n"
             f"**System prompt:** {settings['system_prompt'][:50]}...\n\n"
-            "Используйте команды для изменения:\n"
-            "/temp [0.1-2.0] - изменить температуру\n"
-            "/maxtokens [число] - изменить max tokens\n"
-            "/model - выбрать модель"
+            "Изменить:\n"
+            "/temp [0.1-2.0]\n"
+            "/maxtokens [100-4000]"
         )
-        
-        await update.message.reply_text(settings_text, parse_mode='Markdown')
+        await update.message.reply_text(text, parse_mode='Markdown')
     
     async def change_model(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Смена модели"""
         keyboard = []
         for model_id, description in self.available_models.items():
             keyboard.append([InlineKeyboardButton(
-                f"{model_id} - {description}", 
+                f"{model_id}", 
                 callback_data=f"model_{model_id}"
             )])
         
@@ -237,95 +225,59 @@ class OpenAITelegramBot:
             if 0.1 <= temp <= 2.0:
                 user_id = update.effective_user.id
                 self.user_settings[user_id]["temperature"] = temp
-                await update.message.reply_text(f"✅ Температура установлена на {temp}")
+                await update.message.reply_text(f"✅ Температура: {temp}")
             else:
-                await update.message.reply_text("❌ Температура должна быть от 0.1 до 2.0")
-        except (IndexError, ValueError):
+                await update.message.reply_text("❌ Температура от 0.1 до 2.0")
+        except:
             await update.message.reply_text("Использование: /temp [0.1-2.0]")
     
-    async def set_max_tokens(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Установка максимального количества токенов"""
-        try:
-            tokens = int(context.args[0])
-            if 100 <= tokens <= 4000:
-                user_id = update.effective_user.id
-                self.user_settings[user_id]["max_tokens"] = tokens
-                await update.message.reply_text(f"✅ Max tokens установлен на {tokens}")
-            else:
-                await update.message.reply_text("❌ Max tokens должен быть от 100 до 4000")
-        except (IndexError, ValueError):
-            await update.message.reply_text("Использование: /maxtokens [100-4000]")
-    
-    async def set_system_prompt(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Установка системного промпта"""
-        if context.args:
-            prompt = ' '.join(context.args)
-            user_id = update.effective_user.id
-            self.user_settings[user_id]["system_prompt"] = prompt
-            await update.message.reply_text(f"✅ System prompt обновлен!")
-        else:
-            await update.message.reply_text(
-                "Использование: /system [ваш промпт]\n"
-                "Например: /system Ты эксперт по Python программированию"
-            )
-    
     async def clear_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Очистка истории диалога"""
+        """Очистка истории"""
         user_id = update.effective_user.id
         if user_id in self.user_conversations:
             self.user_conversations[user_id].clear()
-        await update.message.reply_text("🧹 История диалога очищена!")
+        await update.message.reply_text("🧹 История очищена!")
     
     async def show_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Показ статистики"""
+        """Статистика"""
         user_id = update.effective_user.id
         history = self.get_user_history(user_id)
         
-        stats_text = (
+        text = (
             f"📊 **Статистика**\n\n"
-            f"**Сообщений в истории:** {len(history)}\n"
-            f"**Модель:** {self.get_user_settings(user_id)['model']}\n"
-            f"**Температура:** {self.get_user_settings(user_id)['temperature']}\n\n"
-            f"Использовано токенов: информация доступна в OpenAI Dashboard"
+            f"**Сообщений:** {len(history)}\n"
+            f"**Модель:** {self.get_user_settings(user_id)['model']}"
         )
-        
-        await update.message.reply_text(stats_text, parse_mode='Markdown')
+        await update.message.reply_text(text, parse_mode='Markdown')
     
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработчик текстовых сообщений"""
+        """Обработчик сообщений"""
         user_id = update.effective_user.id
         user_message = update.message.text
         
-        # Показываем индикатор "печатает"
         await context.bot.send_chat_action(
             chat_id=update.effective_chat.id, 
             action="typing"
         )
         
         try:
-            # Генерируем ответ через OpenAI
             response = await self.generate_openai_response(user_id, user_message)
             
             if response:
-                # Разбиваем длинные сообщения на части
                 if len(response) > 4096:
                     for i in range(0, len(response), 4096):
                         await update.message.reply_text(response[i:i+4096])
                 else:
                     await update.message.reply_text(response)
             else:
-                await update.message.reply_text(
-                    "❌ Не удалось получить ответ от OpenAI. Попробуйте позже."
-                )
+                await update.message.reply_text("❌ Ошибка получения ответа")
                 
         except Exception as e:
-            logger.error(f"Error handling message: {e}")
-            await update.message.reply_text(
-                "❌ Произошла ошибка. Пожалуйста, попробуйте еще раз."
-            )
+            logger.error(f"Error: {e}")
+            await update.message.reply_text("❌ Ошибка. Попробуйте еще раз.")
     
     async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработчик нажатий на кнопки"""
+        """Обработчик кнопок"""
         query = update.callback_query
         await query.answer()
         
@@ -344,50 +296,84 @@ class OpenAITelegramBot:
             model = query.data.replace("model_", "")
             user_id = update.effective_user.id
             self.user_settings[user_id]["model"] = model
-            await query.edit_message_text(f"✅ Модель изменена на {model}")
+            await query.edit_message_text(f"✅ Модель: {model}")
     
-    def run(self):
+    async def setup_application(self):
+        """Настройка приложения"""
+        self.application = Application.builder().token(self.telegram_token).build()
+        
+        # Регистрация обработчиков
+        self.application.add_handler(CommandHandler("start", self.start))
+        self.application.add_handler(CommandHandler("help", self.help_command))
+        self.application.add_handler(CommandHandler("settings", self.settings))
+        self.application.add_handler(CommandHandler("model", self.change_model))
+        self.application.add_handler(CommandHandler("temp", self.set_temperature))
+        self.application.add_handler(CommandHandler("clear", self.clear_history))
+        self.application.add_handler(CommandHandler("stats", self.show_stats))
+        
+        self.application.add_handler(CallbackQueryHandler(self.button_callback))
+        
+        self.application.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND, 
+            self.handle_message
+        ))
+        
+        logger.info("Обработчики зарегистрированы")
+    
+    async def run_bot(self):
         """Запуск бота"""
+        await self.setup_application()
+        
+        logger.info("Бот запускается...")
+        
         try:
-            # Создание приложения
-            self.application = Application.builder().token(self.telegram_token).build()
+            await self.application.initialize()
+            await self.application.start()
             
-            # Регистрация обработчиков команд
-            self.application.add_handler(CommandHandler("start", self.start))
-            self.application.add_handler(CommandHandler("help", self.help_command))
-            self.application.add_handler(CommandHandler("settings", self.settings))
-            self.application.add_handler(CommandHandler("model", self.change_model))
-            self.application.add_handler(CommandHandler("temp", self.set_temperature))
-            self.application.add_handler(CommandHandler("maxtokens", self.set_max_tokens))
-            self.application.add_handler(CommandHandler("system", self.set_system_prompt))
-            self.application.add_handler(CommandHandler("clear", self.clear_history))
-            self.application.add_handler(CommandHandler("stats", self.show_stats))
+            # Используем polling
+            await self.application.updater.start_polling()
             
-            # Обработчик кнопок
-            self.application.add_handler(CallbackQueryHandler(self.button_callback))
+            logger.info("Бот успешно запущен и готов к работе!")
             
-            # Обработчик текстовых сообщений
-            self.application.add_handler(MessageHandler(
-                filters.TEXT & ~filters.COMMAND, 
-                self.handle_message
-            ))
-            
-            logger.info("Бот запущен и готов к работе!")
-            self.application.run_polling(allowed_updates=Update.ALL_TYPES)
-            
+            # Держим бота запущенным
+            while True:
+                await asyncio.sleep(1)
+                
         except Exception as e:
-            logger.error(f"Ошибка запуска бота: {e}")
+            logger.error(f"Ошибка при запуске бота: {e}")
+        finally:
+            await self.application.stop()
 
-# Файл requirements.txt
-requirements = """
-python-telegram-bot==20.7
-openai==1.6.1
-"""
+# Создаем глобальный экземпляр бота
+telegram_bot = OpenAITelegramBot()
+
+@app.route('/')
+def home():
+    """Проверка работы бота"""
+    return jsonify({
+        "status": "running",
+        "message": "Telegram OpenAI Bot is running!",
+        "timestamp": datetime.now().isoformat()
+    })
+
+@app.route('/health')
+def health():
+    """Проверка здоровья"""
+    return jsonify({"status": "healthy"})
+
+def run_flask():
+    """Запуск Flask сервера"""
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+
+def run_bot():
+    """Запуск бота в отдельном потоке"""
+    asyncio.run(telegram_bot.run_bot())
 
 if __name__ == "__main__":
-    # Токены (получите свои)
-    TELEGRAM_TOKEN = "7640794685:AAHWcNmnqrRJw2lqVSymXp3pXym2vndql6g"
-    OPENAI_API_KEY = "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"
-    # Создание и запуск бота
-    bot = OpenAITelegramBot(TELEGRAM_TOKEN, OPENAI_API_KEY)
-    bot.run()
+    # Запускаем бота в отдельном потоке
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+    
+    # Запускаем Flask сервер
+    run_flask()
